@@ -13,3 +13,9 @@ Next: remaining parsers, workers + IndexedDB, merge/undo, UI, screening, export,
 1 normalize -> 2 exact (DOI / PMID / title+year) -> 3 blocking (first 3 title tokens, year +/-1)
 -> 4 weighted fuzzy score (missing fields neutral, DOI conflict x0.5) -> 5 tiers (>=0.95 auto, 0.80-0.95 possible).
 Errata/retractions never merge with originals; preprint-vs-published is capped at "possible".
+
+## Run / deploy
+    npm install && npm run dev      # local
+    npm run build                   # outputs dist/
+Vercel: framework Vite, build `npm run build`, output `dist`. GitHub Pages: publish `dist/` (base is `./`).
+Repo root must contain package.json and index.html.
