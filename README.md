@@ -2,6 +2,12 @@
 Open-source, fully client-side systematic-review tool (import, dedup, screening, export). No backend.
 
 ## Status
+v0.3: working UI - import (RIS/BibTeX/CSV/TSV), deduplication with review queue, merge/undo, manual screening with keyword highlighting, table, CSV export, PRISMA counts. Data persists in IndexedDB.
+
+## Roadmap
+Workers, nbib/EndNote/JSON, RIS/XLSX export, AI assist, collaboration (shared folder, P2P, file exchange), blinding, kappa.
+
+## (older notes)
 Increment 1: core library (types, normalizer, RIS parser, staged dedup engine) + tests.
 Next: remaining parsers, workers + IndexedDB, merge/undo, UI, screening, export, AI, collaboration.
 
