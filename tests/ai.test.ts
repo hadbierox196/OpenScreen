@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { limitInfo, isFree, mergeTerms, parseDup, parseJson, parseKeywords, parseScreen, screenMessages } from '../src/ai';
+import { FALLBACK_MODELS, addModelId, limitInfo, maskKey, upsertKey, isFree, mergeTerms, parseDup, parseJson, parseKeywords, parseScreen, screenMessages } from '../src/ai';
 
 describe('ai parsing', () => {
   it('extracts JSON from fences and <think> blocks', () => {
@@ -34,5 +34,22 @@ describe('ai parsing', () => {
     expect(limitInfo(h('12'), { error: { message: 'Rate limit exceeded' } })).toEqual({ retryAfter: 12000, daily: false });
     expect(limitInfo(h(null), { error: { message: 'Rate limit exceeded' } })).toEqual({ retryAfter: 60000, daily: false });
     expect(limitInfo(h(null), { error: { message: 'Rate limit exceeded: free-models-per-day' } }).daily).toBe(true);
+  });
+  it('saves, updates and masks keys', () => {
+    const a = upsertKey([], 'Main', 'sk-or-v1-aaaaaaaa1111');
+    expect(upsertKey(a, 'Main', 'sk-or-v1-bbbbbbbb2222')).toEqual([{ label: 'Main', key: 'sk-or-v1-bbbbbbbb2222' }]);
+    expect(upsertKey(a, 'Second', 'sk-or-v1-cccccccc3333')).toHaveLength(2);
+    expect(upsertKey(a, '', '  ')).toBe(a);
+    expect(maskKey('sk-or-v1-aaaaaaaa1111')).toBe('sk-or-v1…1111');
+  });
+  it('validates custom model ids', () => {
+    expect(addModelId([], 'meta-llama/llama-3.3-70b-instruct:free')).toEqual(['meta-llama/llama-3.3-70b-instruct:free']);
+    expect(addModelId(['a/b'], 'a/b')).toEqual(['a/b']);
+    expect(addModelId([], 'not a model')).toEqual([]);
+  });
+  it('keeps the built-in model list free and current', () => {
+    expect(FALLBACK_MODELS.length).toBeGreaterThan(2);
+    expect(FALLBACK_MODELS.every(m => isFree({ id: m.id }))).toBe(true);
+    expect(FALLBACK_MODELS.some(m => /llama-3\.3|gemma-3|mistral-small-3\.1/.test(m.id))).toBe(false);
   });
 });

@@ -216,3 +216,4 @@ button.sync.s-busy .ic,.syncline.s-syncing .ic{animation:rot 1.2s linear infinit
 .tally .t-include{background:var(--ok-soft);border-color:transparent}.tally .t-include b{color:var(--ok)}
 .tally .t-exclude{background:var(--bad-soft);border-color:transparent}.tally .t-exclude b{color:var(--bad)}
 .tally .t-maybe{background:var(--warn-soft);border-color:transparent}.tally .t-maybe b{color:var(--warn)}
+.keyrow{padding:6px 0;border-bottom:1px solid var(--line)}.keyrow code{margin-left:6px}

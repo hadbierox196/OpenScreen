@@ -5,24 +5,52 @@ import type { AiSuggestion, Project, Verdict } from './store';
 export const OR_BASE = 'https://openrouter.ai/api/v1';
 /** OpenRouter's free-models router: picks any available free model for you. */
 export const AUTO_MODEL = 'openrouter/free';
-export interface AiSettings { key: string; model: string; fallback: boolean }
-export const defaultSettings: AiSettings = { key: '', model: AUTO_MODEL, fallback: true };
+export interface SavedKey { label: string; key: string }
+/** key = the key in use; saved = keys you can switch between; custom = model IDs you added yourself. */
+export interface AiSettings { key: string; model: string; fallback: boolean; saved: SavedKey[]; custom: string[] }
+export const defaultSettings: AiSettings = { key: '', model: AUTO_MODEL, fallback: true, saved: [], custom: [] };
 const LS = 'openscreen.ai';
 export function loadSettings(): AiSettings {
-  try { return { ...defaultSettings, ...JSON.parse(localStorage.getItem(LS) || '{}') }; } catch { return defaultSettings; }
+  try {
+    const s = { ...defaultSettings, ...JSON.parse(localStorage.getItem(LS) || '{}') };
+    return { ...s, saved: Array.isArray(s.saved) ? s.saved : [], custom: Array.isArray(s.custom) ? s.custom : [] };
+  } catch { return defaultSettings; }
+}
+/** Adds a key, or updates it when the label or the key is already saved. */
+export function upsertKey(saved: SavedKey[], label: string, key: string): SavedKey[] {
+  const k = key.trim(); if (!k) return saved;
+  const l = label.trim() || `Key ${saved.length + 1}`, i = saved.findIndex(x => x.key === k || x.label === l);
+  if (i < 0) return [...saved, { label: l, key: k }];
+  return saved.map((x, n) => (n === i ? { label: l, key: k } : x));
+}
+export const maskKey = (k: string) => (k.length > 10 ? `${k.slice(0, 8)}…${k.slice(-4)}` : '••••');
+/** Accepts "vendor/model" ids (optionally with :free) and ignores duplicates. */
+export function addModelId(custom: string[], id: string): string[] {
+  const m = id.trim();
+  return /^[\w.-]+\/[\w.:-]+$/.test(m) && !custom.includes(m) ? [...custom, m] : custom;
 }
 export function saveSettings(s: AiSettings) { try { localStorage.setItem(LS, JSON.stringify(s)); } catch { /* ignore */ } }
 
 /* ---------- free model discovery ---------- */
 export interface FreeModel { id: string; name: string; ctx: number }
 /** Used only until the live list loads (the live list is authoritative; free models come and go). */
-export const FALLBACK_MODELS: FreeModel[] = [
-  { id: 'meta-llama/llama-3.3-70b-instruct:free', name: 'Llama 3.3 70B Instruct', ctx: 65536 },
-  { id: 'google/gemma-3-27b-it:free', name: 'Gemma 3 27B', ctx: 96000 },
-  { id: 'mistralai/mistral-small-3.1-24b-instruct:free', name: 'Mistral Small 3.1 24B', ctx: 96000 },
+export const FALLBACK_MODELS: FreeModel[] = [   // checked against OpenRouter's free collection, Nov 2026
+  { id: 'nvidia/nemotron-3-ultra-550b-a55b:free', name: 'Nemotron 3 Ultra', ctx: 1000000 },
+  { id: 'nvidia/nemotron-3.5-super-vl:free', name: 'Nemotron 3.5 Super VL', ctx: 1000000 },
+  { id: 'nvidia/nemotron-3.5-lightning:free', name: 'Nemotron 3.5 Lightning', ctx: 1000000 },
+  { id: 'google/gemma-4-31b-it:free', name: 'Gemma 4 31B', ctx: 262144 },
+  { id: 'google/gemma-4-26b-a4b-it:free', name: 'Gemma 4 26B A4B', ctx: 262144 },
 ];
-let cache: FreeModel[] = FALLBACK_MODELS;
+/* The live list is remembered between visits so the dropdown is ready before the next refresh. */
+const LSM = 'openscreen.models.v2';   // v2: drops lists cached before the Nov 2026 refresh
+function loadModels(): { list: FreeModel[]; at: number } {
+  try { const j = JSON.parse(localStorage.getItem(LSM) || 'null'); if (j && Array.isArray(j.list) && j.list.length) return { list: j.list, at: Number(j.at) || 0 }; } catch { /* ignore */ }
+  return { list: FALLBACK_MODELS, at: 0 };
+}
+let { list: cache, at: cacheAt } = loadModels();
 export const cachedModels = () => cache;
+/** When the free-model list was last refreshed from OpenRouter (0 = never). */
+export const modelsUpdatedAt = () => cacheAt;
 
 interface RawModel { id?: string; name?: string; context_length?: number; pricing?: { prompt?: string | number; completion?: string | number }; architecture?: { output_modalities?: string[] } }
 export function isFree(m: RawModel): boolean {
@@ -38,7 +66,7 @@ export async function fetchFreeModels(signal?: AbortSignal): Promise<FreeModel[]
   const j = (await r.json()) as { data?: RawModel[] };
   const list = (j.data || []).filter(isFree).map(m => ({ id: m.id!, name: m.name || m.id!, ctx: m.context_length || 0 }))
     .sort((a, b) => b.ctx - a.ctx || a.name.localeCompare(b.name));
-  if (list.length) cache = list;
+  if (list.length) { cache = list; cacheAt = Date.now(); try { localStorage.setItem(LSM, JSON.stringify({ list, at: cacheAt })); } catch { /* ignore */ } }
   return list;
 }
 
