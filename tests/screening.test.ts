@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { empty } from '../src/store';
-import { etaMinutes, makeDecision, missingReasons, queue, relevance } from '../src/screening';
+import { batchEtaSeconds, fmtDuration, etaMinutes, makeDecision, missingReasons, queue, relevance } from '../src/screening';
 import { numbering } from '../src/team';
 const rec = (i: number, title: string, abstract = '') => ({ id: 'r' + i, title, abstract, authors: [], journal: '', volume: '', issue: '', pages: '', doi: '', pmid: '', keywords: [], sourceDb: '', batch: '', raw: '' });
 const mk = (decisions: any = {}) => ({ ...empty, inc: 'randomized', exc: 'protocol', recs: [rec(1, 'A cohort study'), rec(2, 'A randomized trial', 'randomized controlled'), rec(3, 'Study protocol'), rec(4, 'Plain')], decisions } as any);
@@ -22,5 +22,11 @@ describe('screening logic', () => {
   it('estimates time left only with enough data', () => {
     expect(etaMinutes(3, 0, 100, 60000)).toBeUndefined();
     expect(etaMinutes(10, 0, 100, 600000)).toBe(100);
+  });
+  it('estimates AI batch time from pace', () => {
+    expect(batchEtaSeconds(0, 10, 0)).toBe(32);
+    expect(batchEtaSeconds(10, 10, 40000)).toBe(0);
+    expect(batchEtaSeconds(10, 110, 100000)).toBe(1000);
+    expect(fmtDuration(45)).toBe('45 s'); expect(fmtDuration(250)).toBe('4 min'); expect(fmtDuration(4500)).toBe('1 h 15 min');
   });
 });

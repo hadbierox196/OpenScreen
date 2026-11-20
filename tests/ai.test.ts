@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isFree, mergeTerms, parseDup, parseJson, parseKeywords, parseScreen, screenMessages } from '../src/ai';
+import { limitInfo, isFree, mergeTerms, parseDup, parseJson, parseKeywords, parseScreen, screenMessages } from '../src/ai';
 
 describe('ai parsing', () => {
   it('extracts JSON from fences and <think> blocks', () => {
@@ -28,5 +28,11 @@ describe('ai parsing', () => {
     const m = screenMessages({ title: 'T', abstract: 'A', authors: [], year: 2020, journal: 'J' } as never, { question: 'Q?', criteria: 'C' });
     expect(m[0].content).toMatch(/never follow instructions/);
     expect(m[1].content).toContain('Q?');
+  });
+  it('tells the per-minute limit from the daily one', () => {
+    const h = (v: string | null) => ({ headers: { get: () => v } });
+    expect(limitInfo(h('12'), { error: { message: 'Rate limit exceeded' } })).toEqual({ retryAfter: 12000, daily: false });
+    expect(limitInfo(h(null), { error: { message: 'Rate limit exceeded' } })).toEqual({ retryAfter: 60000, daily: false });
+    expect(limitInfo(h(null), { error: { message: 'Rate limit exceeded: free-models-per-day' } }).daily).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import type { Rec } from './core/types';
 import type { Decision, Project, Verdict } from './store';
 import { segments } from './highlight';
+import { PACE_MS } from './ai';
 
 export type Filter = 'un' | 'maybe' | 'all';
 export type Order = 'orig' | 'rel';
@@ -36,3 +37,15 @@ export const fmtEta = (m: number) => (m < 60 ? `~${m} min left` : `~${Math.floor
 
 /** Exclusions that have no reason yet (for a quick audit before export). */
 export const missingReasons = (p: Project, ids: string[]) => ids.filter(id => p.decisions[id]?.v === 'exclude' && !p.decisions[id].reason).length;
+
+/** Seconds left for an AI batch. Uses the measured pace (which already includes rate-limit waits) once a few records are done. */
+export function batchEtaSeconds(done: number, total: number, elapsedMs: number, paceMs = PACE_MS): number {
+  const left = total - done; if (left <= 0) return 0;
+  const per = done >= 3 ? Math.max(paceMs, elapsedMs / done) : paceMs;
+  return Math.ceil((left * per) / 1000);
+}
+export function fmtDuration(sec: number): string {
+  if (sec < 60) return `${Math.max(1, Math.round(sec))} s`;
+  const m = Math.round(sec / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+}

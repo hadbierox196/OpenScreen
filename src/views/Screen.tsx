@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AiError, mergeTerms, screenOne, sleep, suggestKeywords } from '../ai';
+import { mergeTerms, screenOne, suggestKeywords } from '../ai';
+import { prescreen, type BatchStats } from '../prescreen';
+import { PrescreenModal } from './PrescreenModal';
 import type { Decision, Project, Scope, Verdict } from '../store';
 import { myRanges, numbering, scopedRecs } from '../team';
 import { etaMinutes, fmtEta, makeDecision, missingReasons, queue, type Filter, type Order } from '../screening';
@@ -12,7 +14,7 @@ export function Screen({ p, upd, ai }: { p: Project; upd: Upd; ai: AiCtx }) {
   const toast = useToast();
   const [filter, setFilter] = useState<Filter>('un'), [order, setOrder] = useState<Order>('orig'), [i, setI] = useState(0), [reason, setReason] = useState(''), [note, setNote] = useState('');
   const [exit, setExit] = useState<Verdict | null>(null), [panel, setPanel] = useState<'kw' | 'crit' | null>(null);
-  const [busy, setBusy] = useState(false), [kwBusy, setKwBusy] = useState(false), [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  const [busy, setBusy] = useState(false), [kwBusy, setKwBusy] = useState(false), [batch, setBatch] = useState<BatchStats | null>(null), [popup, setPopup] = useState(false);
   const [hist, setHist] = useState<{ id: string; prev?: Decision }[]>([]), [focus, setFocus] = useState<string | null>(null);
   const stop = useRef<AbortController | null>(null), t0 = useRef<{ x: number; y: number } | null>(null), session = useRef({ at: Date.now(), n: 0 });
   const [dx, setDx] = useState(0), [jump, setJump] = useState('');
@@ -70,20 +72,14 @@ export function Screen({ p, upd, ai }: { p: Project; upd: Upd; ai: AiCtx }) {
     if (needSetup()) { setPanel('crit'); toast('Add your review question or criteria first', 'info'); return; }
     const todo = act.filter(x => !p.decisions[x.id] && !p.ai[x.id]);
     if (!todo.length) { toast('Nothing left to pre-screen', 'info'); return; }
-    const ac = new AbortController(); stop.current = ac; setBatch({ done: 0, total: todo.length });
-    let ok = 0, fails = 0;
-    for (let n = 0; n < todo.length && !ac.signal.aborted; n++) {
-      try { const s = await screenOne(ai.s, todo[n], p, ac.signal); upd(q => ({ ...q, ai: { ...q.ai, [todo[n].id]: s } })); ok++; fails = 0; }
-      catch (e) {
-        if (ac.signal.aborted) break;
-        fails++; const st = e instanceof AiError ? e.status : 0;
-        if (st === 401 || st === 402 || fails >= 3) { fail(e); break; }
-        if (st === 429) await sleep(12000, ac.signal);
-      }
-      setBatch({ done: n + 1, total: todo.length });
-      await sleep(2500, ac.signal);                                  // stay under free-tier rate limits
-    }
-    stop.current = null; setBatch(null); toast(`AI pre-screened ${ok} record${ok === 1 ? '' : 's'}`, ok ? 'ok' : 'info');
+    const ac = new AbortController(); stop.current = ac; setPopup(true);
+    const res = await prescreen({
+      todo, s: ai.s, q: p, signal: ac.signal, onProgress: setBatch,
+      onResult: (rec, sg) => upd(q => ({ ...q, ai: { ...q.ai, [rec.id]: sg } })),
+    });
+    stop.current = null; setBatch(res);
+    const n = res.include + res.exclude + res.maybe;
+    toast(`AI pre-screened ${n} record${n === 1 ? '' : 's'}`, n ? 'ok' : 'info');
   };
   const genKeywords = async () => {
     if (!ai.s.key) return ai.open();
@@ -104,9 +100,11 @@ export function Screen({ p, upd, ai }: { p: Project; upd: Upd; ai: AiCtx }) {
   });
 
   const hc = r ? hitCount(r, p) : { inc: 0, exc: 0 }, cur = r && p.decisions[r.id], sug = r && p.ai[r.id];
+  const running = !!batch && !batch.endedAt;
   const pending = act.filter(x => !p.decisions[x.id] && !p.ai[x.id]).length;
   return (
     <div className="stack">
+      <PrescreenModal st={batch} open={popup} onStop={() => stop.current?.abort()} onClose={() => setPopup(false)} />
       <section className="card toolbar enter">
         <div className="progress"><div style={{ width: `${pct * 100}%` }} /></div>
         <div className="row">
@@ -139,10 +137,10 @@ export function Screen({ p, upd, ai }: { p: Project; upd: Upd; ai: AiCtx }) {
           <button className={`ghost${panel === 'kw' ? ' on' : ''}`} onClick={() => setPanel(x => (x === 'kw' ? null : 'kw'))}><Icon n="tag" size={16} />Keywords</button>
           <button className={`ghost${panel === 'crit' ? ' on' : ''}`} onClick={() => setPanel(x => (x === 'crit' ? null : 'crit'))}><Icon n="book" size={16} />Review criteria</button>
           <span className="grow" />
-          {batch ? <button className="danger" onClick={() => stop.current?.abort()}><Icon n="stop" size={16} />Stop ({batch.done}/{batch.total})</button>
+          {running ? <><button className="ghost" onClick={() => setPopup(true)}>Progress</button><button className="danger" onClick={() => stop.current?.abort()}><Icon n="stop" size={16} />Stop ({batch!.done}/{batch!.total})</button></>
             : <button className="ai" onClick={runBatch} disabled={!act.length}><Icon n="sparkles" size={16} />AI pre-screen{pending > 0 ? ` ${pending}` : ''}</button>}
         </div>
-        {batch && <div className="progress ai"><div style={{ width: `${(batch.done / batch.total) * 100}%` }} /></div>}
+        {running && <div className="progress ai"><div style={{ width: `${(batch!.done / batch!.total) * 100}%` }} /></div>}
         <Collapse open={panel === 'kw'}>
           <p className="muted">One per line or comma-separated. Phrases and wildcards work: <code>random*</code>. Green = include, red = exclude.</p>
           <div className="two">

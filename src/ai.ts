@@ -44,25 +44,43 @@ export async function fetchFreeModels(signal?: AbortSignal): Promise<FreeModel[]
 
 /* ---------- chat ---------- */
 export class AiError extends Error {
-  status: number;
-  constructor(msg: string, status = 0) { super(msg); this.name = 'AiError'; this.status = status; }
+  status: number; retryAfter?: number; daily?: boolean;
+  constructor(msg: string, status = 0, o: { retryAfter?: number; daily?: boolean } = {}) { super(msg); this.name = 'AiError'; this.status = status; this.retryAfter = o.retryAfter; this.daily = o.daily; }
+}
+/** OpenRouter caps every ":free" model at 20 requests/minute and 50/day (1,000/day after $10 of credits), shared across all free models. */
+export const PACE_MS = 3200;                                                     // start-to-start gap that stays under 20 requests/minute
+/** Works out how long to wait after a 429, and whether it is the per-minute cap (wait and go on) or the daily cap (stop). */
+export function limitInfo(res: { headers: { get(n: string): string | null } } | null, body: unknown): { retryAfter: number; daily: boolean } {
+  const e = (body as { error?: { message?: string; metadata?: { headers?: Record<string, string> } } })?.error, msg = String(e?.message || '');
+  let wait = 0;
+  const ra = Number(res?.headers.get('retry-after'));
+  if (isFinite(ra) && ra > 0) wait = ra * 1000;
+  let reset = Number(e?.metadata?.headers?.['X-RateLimit-Reset']);
+  if (!wait && isFinite(reset) && reset > 0) { if (reset < 1e11) reset *= 1000; wait = Math.max(0, reset - Date.now()); }
+  const daily = /per[\s_-]?day|daily/i.test(msg) || wait > 10 * 60_000;
+  return { retryAfter: wait > 0 ? Math.min(Math.max(wait, 5000), 90_000) : 60_000, daily };
 }
 export type Msg = { role: 'system' | 'user' | 'assistant'; content: string };
 
-function friendly(status: number, body: unknown): string {
+function friendly(status: number, body: unknown, daily = false): string {
   const raw = (body as { error?: { message?: string } })?.error?.message || '';
   if (status === 401) return 'OpenRouter rejected the API key. Check it in AI settings.';
   if (status === 402) return 'This model needs credits. Pick a ":free" model or add credits on OpenRouter.';
   if (status === 404) return `No endpoint for that model. If it is a free model, enable free endpoints at openrouter.ai/settings/privacy. ${raw}`.trim();
-  if (status === 429) return 'Rate limit reached for free models. Wait a moment and try again.';
+  if (status === 429) return daily ? 'The daily limit for free models is used up (50 requests/day, or 1,000/day once you have bought $10+ of OpenRouter credits). Your results so far are saved. Continue tomorrow or add credits.' : 'Free models allow about 20 requests per minute. Waiting for the limit to reset.';
   if (status >= 500) return 'The model provider had a temporary problem.';
   return raw || `Request failed (HTTP ${status}).`;
 }
 
-/** Sends a chat request. On model-specific failures (404/429/5xx/empty) it tries other free models when fallback is on. */
+function mkErr(status: number, body: unknown, res: Parameters<typeof limitInfo>[0] = null): AiError {
+  if (status === 429) { const li = limitInfo(res, body); return new AiError(friendly(429, body, li.daily), 429, li); }
+  return new AiError(friendly(status, body), status);
+}
+
+/** Sends a chat request. On model-specific failures (404/5xx/empty) it tries other free models when fallback is on. A 429 is never retried on another model: the limit is shared by all free models, so switching only burns the daily allowance. */
 export async function chat(s: AiSettings, messages: Msg[], o: { signal?: AbortSignal; max?: number } = {}): Promise<{ text: string; model: string }> {
   if (!s.key.trim()) throw new AiError('Add your OpenRouter API key in AI settings first.', 401);
-  const extra = s.fallback ? cache.map(m => m.id).filter(id => id !== s.model).slice(0, 3) : [];
+  const extra = s.fallback ? cache.map(m => m.id).filter(id => id !== s.model).slice(0, 2) : [];
   let last = new AiError('No model available.');
   for (const model of [s.model || AUTO_MODEL, ...extra]) {
     try {
@@ -75,15 +93,15 @@ export async function chat(s: AiSettings, messages: Msg[], o: { signal?: AbortSi
         body: JSON.stringify({ model, messages, temperature: 0.2, max_tokens: o.max ?? 1200 }),
       });
       const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new AiError(friendly(r.status, j), r.status);
-      if (j?.error) throw new AiError(friendly(Number(j.error.code) || 500, j), Number(j.error.code) || 500);
+      if (!r.ok) throw mkErr(r.status, j, r);
+      if (j?.error) throw mkErr(Number(j.error.code) || 500, j, r);
       const text: string | undefined = j?.choices?.[0]?.message?.content;
       if (!text || !text.trim()) throw new AiError('The model returned an empty answer.', 204);
       return { text, model: j.model || model };
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
       last = e instanceof AiError ? e : new AiError(e instanceof Error ? e.message : 'Network error');
-      if (last.status === 401 || last.status === 402) throw last;                  // not model-specific: stop
+      if (last.status === 401 || last.status === 402 || last.status === 429) throw last;   // not model-specific: stop
     }
   }
   throw last;
