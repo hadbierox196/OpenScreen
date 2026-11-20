@@ -30,6 +30,13 @@ v0.3: working UI - import (RIS/BibTeX/CSV/TSV), deduplication with review queue,
 ## v0.8: one-tap invite links
 - Connected lead: Team > Invite reviewers shares (or copies) a link like `https://your.app/#join=...`. Opening it connects the phone to the sheet automatically; no URL or token typing. The token lives in the URL hash (never sent to a server) and is removed from the address bar after joining.
 
+## v0.9: cloud teams (Firebase), local-first
+- Removed: shared-folder sync, Google Sheet backend, file exchange and tokens.
+- **Team tab**: the lead creates a team (records + settings are uploaded once) and shares **one invite link**. Reviewers open it, enter their name and screen. Work stays on each device until **Sync** is pressed; a dot on the Sync button shows unsynced changes.
+- **Finish**: the lead's final sync downloads `screened.csv` with every reviewer's decisions, then deletes the project from Firebase.
+- Export tab also has a tidy **All decisions (long)** CSV (one row per record x reviewer).
+- Setup: see `firebase/README.md` and `firebase/firestore.rules`.
+
 ## Roadmap
 Workers, nbib/EndNote/JSON, RIS/XLSX export, P2P/hosted realtime sync.
 

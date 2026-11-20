@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { empty, load, save, type Project } from './store';
 import { loadSettings, type AiSettings } from './ai';
 import { Icon, Num, Ring, ToastProvider, useToast, type IconName } from './ui';
-import { useFolderSync } from './sync';
+import { useTeam } from './sync';
 import { uid } from './team';
-import { parseInvite } from './sheet';
-import { Team, STATUS_LABEL } from './views/Team';
+import { isDirty, parseInvite } from './teamsync';
+import { Team } from './views/Team';
+import { JoinModal } from './views/Join';
 import { active, pendingPairs, type Tab, type Upd } from './shared';
 import { Import } from './views/Import';
 import { Dups } from './views/Dups';
@@ -27,14 +28,10 @@ function Shell() {
   useEffect(() => { document.documentElement.dataset.theme = dark ? 'dark' : 'light'; try { localStorage.setItem('openscreen.theme', dark ? 'dark' : 'light'); } catch { /* ignore */ } }, [dark]);
   const upd = useCallback<Upd>(f => setP(f), []);
   useEffect(() => { if (ready && (!p.me.id || !p.pid)) upd(q => ({ ...q, me: q.me.id ? q.me : { ...q.me, id: uid() }, pid: q.pid || uid() })); }, [ready, p.me.id, p.pid, upd]);
-  const sync = useFolderSync(p, upd, ready, toast);
-  const joined = useRef(false);
-  useEffect(() => { // one-tap invite: open the link, get connected
-    if (!ready || !p.me.id || !p.pid || joined.current) return;
-    const inv = parseInvite(location.hash); if (!inv) return;
-    joined.current = true; history.replaceState(null, '', location.pathname + location.search); // keep the token out of the address bar and history
-    setTab('team'); toast('Joining the team project…', 'info'); sync.connectSheet(inv.url, inv.token);
-  }, [ready, p.me.id, p.pid]); // eslint-disable-line
+  const sync = useTeam(p, upd, toast);
+  const [invite, setInvite] = useState(() => parseInvite(location.hash));
+  const closeInvite = () => { setInvite(null); history.replaceState(null, '', location.pathname + location.search); };
+  const dirty = isDirty(p);
   const act = active(p), screened = act.filter(r => p.decisions[r.id]).length, pct = act.length ? screened / act.length : 0;
   const review = useMemo(() => pendingPairs(p).length, [p.recs, p.pairs, p.kept]); // eslint-disable-line
   const stats: [string, number][] = [['Imported', p.recs.length], ['Unique', act.length], ['Included', act.filter(r => p.decisions[r.id]?.v === 'include').length]];
@@ -47,7 +44,7 @@ function Shell() {
           <div className="brand"><div className="logo"><Icon n="check" size={20} /></div>
             <div><h1>OpenScreen</h1><div className="muted small"><Icon n="lock" size={11} /> Stored locally in your browser</div></div></div>
           <div className="row nowrap">
-            {sync.status !== 'off' && <button className={`ghost pill sync s-${sync.status}`} onClick={() => setTab('team')} title={STATUS_LABEL[sync.status]}><Icon n="cloud" size={16} /><span className="hide-sm">{STATUS_LABEL[sync.status]}</span></button>}
+            {p.team && !p.team.finished && <button className={`ghost pill sync s-${sync.status}${dirty ? ' dirty' : ''}`} onClick={() => (dirty || sync.status === 'error' ? sync.sync() : setTab('team'))} title="Sync with your team"><Icon n="cloud" size={16} /><span className="hide-sm">{sync.busy ? 'Syncing…' : dirty ? 'Sync' : 'Synced'}</span></button>}
             <button className={`ai pill${ai.key ? ' live' : ''}`} onClick={() => setAiOpen(true)}><Icon n="sparkles" size={16} /><span className="hide-sm">{ai.key ? 'AI ready' : 'Set up AI'}</span></button>
             <button className="ghost icon" onClick={() => setDark(d => !d)} aria-label="Toggle theme"><Icon n={dark ? 'sun' : 'moon'} /></button>
           </div>
@@ -70,6 +67,7 @@ function Shell() {
             : <Table p={p} />}
         </div>
       </main>
+      {invite && ready && <JoinModal p={p} invite={invite} sync={sync} onClose={closeInvite} onDone={() => { closeInvite(); setTab('screen'); }} />}
       <AiSettingsModal open={aiOpen} onClose={() => setAiOpen(false)} s={ai} setS={setAi} />
     </>
   );

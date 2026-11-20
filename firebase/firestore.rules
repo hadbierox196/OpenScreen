@@ -1,0 +1,34 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function isMember(t) { return signedIn() && exists(/databases/$(database)/documents/teams/$(t)/members/$(request.auth.uid)); }
+    function isLead(t) { return signedIn() && get(/databases/$(database)/documents/teams/$(t)).data.lead == request.auth.uid; }
+
+    match /teams/{t} {
+      allow create: if signedIn() && request.resource.data.lead == request.auth.uid && request.resource.data.status == 'active';
+      // members read everything; anyone signed in can see the tiny "finished" marker left after cleanup
+      allow read: if isMember(t) || resource.data.status == 'finished';
+      allow update, delete: if isLead(t);
+
+      // joining = writing your own member document with the invite key
+      match /members/{u} {
+        allow create: if signedIn() && u == request.auth.uid
+                      && request.resource.data.key == get(/databases/$(database)/documents/teams/$(t)).data.key;
+        allow update: if signedIn() && u == request.auth.uid && request.resource.data.key == resource.data.key;
+        allow read: if isMember(t);
+        allow delete: if isLead(t);
+      }
+      match /project/{c} {
+        allow read: if isMember(t);
+        allow write: if isLead(t);
+      }
+      // each reviewer can only write documents whose id starts with their own uid
+      match /dec/{d} {
+        allow read: if isMember(t);
+        allow create, update: if isMember(t) && d.matches(request.auth.uid + '_.*') && request.resource.data.rid == request.auth.uid;
+        allow delete: if isLead(t);
+      }
+    }
+  }
+}

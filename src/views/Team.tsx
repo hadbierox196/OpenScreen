@@ -1,51 +1,91 @@
-import { useEffect, useRef, useState } from 'react';
-import { empty, type Project, type Slice, type Verdict } from '../store';
-import { adoptConfig, adoptProject, blindState, coverage, freezePlan, genSlices, isConflict, kappaLabel, mergeReviewer, pairStats, parseTeamFile, reviewerList, toProjectFile, toReviewerFile, votesFor, type SplitMode } from '../team';
-import type { useFolderSync } from '../sync';
-import { loadSheet, makeInvite } from '../sheet';
-import { Badge, VERDICT, active, type Upd } from '../shared';
-import { Empty, Icon, Modal, Num, useToast } from '../ui';
+import { useEffect, useState } from 'react';
+import type { Project, Slice, Verdict } from '../store';
+import { blindState, coverage, freezePlan, genSlices, isConflict, kappaLabel, pairStats, reviewerList, votesFor, type SplitMode } from '../team';
+import { isDirty, makeInvite, parseInvite } from '../teamsync';
+import type { useTeam } from '../sync';
+import { screenedRows } from '../export';
+import { Badge, VERDICT, active, download, type Upd } from '../shared';
+import { Empty, Icon, Modal, Num, Spinner, useToast } from '../ui';
 
-type Sync = ReturnType<typeof useFolderSync>;
-const saveJson = (name: string, data: unknown) => {
-  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' })); a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-};
-const ago = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 5 ? 'just now' : s < 90 ? `${s}s ago` : `${Math.round(s / 60)} min ago`; };
-export const STATUS_LABEL: Record<Sync['status'], string> = { off: 'Not connected', 'needs-permission': 'Needs permission', syncing: 'Syncing…', ok: 'Synced', mismatch: 'Different project', error: 'Sync problem' };
+type Sync = ReturnType<typeof useTeam>;
+const ago = (t: number) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 5 ? 'just now' : s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
 
-function SheetConnect({ sync }: { sync: Sync }) {
-  const saved = loadSheet(), [url, setUrl] = useState(saved?.url ?? ''), [token, setToken] = useState(saved?.token ?? '');
-  const on = sync.mode === 'sheet', toast = useToast();
-  const invite = async () => {
-    const s = loadSheet(); if (!s) return;
-    const link = makeInvite(location.origin + location.pathname, s.url, s.token);
-    try { if (navigator.share) { await navigator.share({ title: 'Join our OpenScreen review', text: 'Tap to join the screening project:', url: link }); return; } } catch (e) { if (e instanceof DOMException && e.name === 'AbortError') return; }
-    try { await navigator.clipboard.writeText(link); toast('Invite link copied. Send it only to your team.'); } catch { window.prompt('Copy this invite link:', link); }
+/** Everything about the cloud team: create, invite, sync, finish. */
+function TeamPanel({ p, sync }: { p: Project; sync: Sync }) {
+  const toast = useToast(), t = p.team;
+  const [teamName, setTeamName] = useState(''), [me, setMe] = useState(p.me.name), [paste, setPaste] = useState(''), [fin, setFin] = useState(false);
+  const link = t?.lead && t.key ? makeInvite(location.origin + location.pathname, t.tid, t.key) : '';
+  const share = async () => {
+    try { if (navigator.share) { await navigator.share({ title: `Join “${t!.name}” on OpenScreen`, text: 'Tap to join our screening project:', url: link }); return; } } catch (e) { if (e instanceof DOMException && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(link); toast('Invite link copied'); } catch { window.prompt('Copy the invite link:', link); }
   };
+  if (!sync.configured) return (
+    <section className="card enter"><h2>Teams</h2>
+      <div className="note"><Icon n="info" size={16} /><span>Team sync is not set up in this copy of the app. Add your Firebase settings (see <code>firebase/README.md</code>) and rebuild. Solo screening works without it.</span></div></section>
+  );
+  if (!t) return (
+    <section className="card enter">
+      <h2>Work as a team</h2>
+      <p className="muted">Create a team and share one invite link. Everyone screens on their own device (phones included); your work stays local until you press <b>Sync</b>.</p>
+      <input placeholder="Team or project name" value={teamName} onChange={e => setTeamName(e.target.value)} />
+      <input placeholder="Your name" value={me} onChange={e => setMe(e.target.value)} style={{ marginTop: 8 }} />
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="pri" disabled={sync.busy || !p.recs.length || !teamName.trim() || !me.trim()} onClick={() => sync.create(teamName, me)}>{sync.busy ? <Spinner /> : <Icon n="users" size={16} />}Create team &amp; upload</button>
+        {sync.busy && sync.step && <span className="muted small">{sync.step}</span>}
+      </div>
+      {!p.recs.length && <p className="muted small">Import (and deduplicate) your records first. They are uploaded once when you create the team.</p>}
+      {sync.err && <p className="err small">{sync.err}</p>}
+      <h3 style={{ marginTop: 18 }}>Joining someone else’s team?</h3>
+      <p className="muted small">Open the invite link they sent you. If it didn’t open here, paste it:</p>
+      <div className="row nowrap"><input placeholder="Invite link" value={paste} onChange={e => setPaste(e.target.value)} autoCapitalize="off" autoCorrect="off" />
+        <button disabled={!parseInvite(paste)} onClick={() => { const i = parseInvite(paste)!; location.hash = `team=${i.tid}.${i.key}`; location.reload(); }}>Open</button></div>
+    </section>
+  );
+  const dirty = isDirty(p), names = Object.entries(t.members), counts = (id: string) => (id === p.me.id ? Object.keys(p.decisions).length : Object.keys(p.others[id]?.decisions ?? {}).length);
   return (
     <>
-      {on && <div className={`syncline s-${sync.status}`}><Icon n="cloud" size={16} /><b>{STATUS_LABEL[sync.status]}</b>{sync.status === 'ok' && sync.last > 0 && <span className="muted">· {ago(sync.last)}</span>}</div>}
-      {sync.mode !== 'folder' && sync.err && <p className="muted small">{sync.err}</p>}
-      {!on ? <>
-        <input placeholder="Web app URL (…/exec)" value={url} onChange={e => setUrl(e.target.value)} autoCapitalize="off" autoCorrect="off" />
-        <input placeholder="Token" value={token} onChange={e => setToken(e.target.value)} autoCapitalize="off" autoCorrect="off" style={{ marginTop: 8 }} />
-        <div className="row" style={{ marginTop: 8 }}><button className="pri" onClick={() => sync.connectSheet(url, token)}><Icon n="cloud" size={16} />Connect</button></div>
-        <p className="muted small">Got an invite link? Just open it, no typing needed. The lead sets this up once (see <code>apps-script/README</code> in the repo) and shares the URL and token. Every decision then lands as a tidy row in their Google Sheet.</p>
-      </> : <div className="row">
-        <button onClick={() => sync.syncNow()}><Icon n="refresh" size={16} />Sync now</button>
-        <button className="pri" onClick={invite}><Icon n="users" size={16} />Invite reviewers</button>
-        <button className="ghost" onClick={sync.publish}>Publish project</button>
-        <button className="ghost" onClick={sync.disconnect}>Disconnect</button></div>}
-      {on && <p className="muted small">“Invite reviewers” makes a link that connects a phone in one tap. Anyone with the link can read and write the project, so share it only with your team.</p>}
+      <section className="card enter">
+        <div className="row"><h2 className="grow">{t.name}</h2><span className={`chip ${t.lead ? 'ok' : ''}`}>{t.lead ? 'Lead' : 'Reviewer'}</span></div>
+        {t.finished ? <div className="note"><Icon n="check" size={16} /><span>This project was finished and removed from the server. Your copy stays on this device. Use the Export tab to save your results.</span></div> : <>
+          <div className={`syncline s-${sync.status === 'busy' ? 'syncing' : sync.status}`}><Icon n="cloud" size={16} /><b>{sync.busy ? sync.step || 'Syncing…' : dirty ? 'Changes not synced yet' : 'Everything synced'}</b>{!sync.busy && t.last > 0 && <span className="muted">· last sync {ago(t.last)}</span>}</div>
+          {sync.err && <p className="err small">{sync.err}</p>}
+          <div className="row"><button className={dirty ? 'pri' : ''} onClick={() => sync.sync()} disabled={sync.busy}><Icon n="refresh" size={16} />Sync now</button>
+            {!t.lead && <button className="ghost danger" onClick={sync.leave}>Leave team</button>}</div>
+          <p className="muted small">Syncing uploads your decisions and downloads your teammates’. Nothing is sent until you press it.</p></>}
+      </section>
+      {t.lead && !t.finished && (
+        <section className="card enter">
+          <h2>Invite link</h2>
+          <p className="muted">One link for everyone. They open it, enter their name and start. Anyone with the link can join, so share it only with your team.</p>
+          <div className="invite">{link}</div>
+          <div className="row"><button className="pri" onClick={share}><Icon n="users" size={16} />Share link</button>
+            {p.recs.length > t.nRecs && <button onClick={sync.republish} disabled={sync.busy}>Send {p.recs.length - t.nRecs} new records to team</button>}</div>
+        </section>
+      )}
+      {!t.finished && names.length > 0 && (
+        <section className="card enter"><h2>Reviewers</h2>
+          <div className="reviewers">{names.map(([id, n]) => <div key={id} className="vote"><span>{id === p.me.id ? `${p.me.name} (you)` : n}</span><span className="muted small">{counts(id)} decided</span></div>)}</div>
+        </section>
+      )}
+      {t.lead && !t.finished && (
+        <section className="card enter"><h2>Finish project</h2>
+          <p className="muted">When screening is done, finishing downloads the combined results to this device and then deletes the project from the server. Ask everyone to press Sync first.</p>
+          <button className="danger" onClick={() => setFin(true)} disabled={sync.busy}>Finish &amp; remove from server…</button></section>
+      )}
+      <Modal open={fin} onClose={() => setFin(false)} title="Finish and remove from the server?">
+        <p className="muted">This syncs one last time, downloads <b>screened.csv</b> with every reviewer’s decisions, then permanently deletes the team’s data from the server. Reviewers keep their own copies. This cannot be undone.</p>
+        <div className="reviewers">{names.map(([id, n]) => <div key={id} className="vote"><span>{id === p.me.id ? `${p.me.name} (you)` : n}</span><span className="muted small">{counts(id)} decided</span></div>)}</div>
+        <div className="row end" style={{ marginTop: 12 }}><button onClick={() => setFin(false)}>Cancel</button>
+          <button className="danger solid" onClick={async () => { setFin(false); await sync.finish(w => download('screened.csv', screenedRows(w, false))); }}>Finish &amp; delete</button></div>
+      </Modal>
     </>
   );
 }
 
 export function Team({ p, upd, sync }: { p: Project; upd: Upd; sync: Sync }) {
-  const toast = useToast(), file = useRef<HTMLInputElement>(null);
+  const canEdit = !p.team || p.team.lead;
+  const toast = useToast();
   const [names, setNames] = useState(''), [mode, setMode] = useState<SplitMode>('batches'), [size, setSize] = useState(300);
-  const [pending, setPending] = useState<ReturnType<typeof toProjectFile> | null>(null), [switchOpen, setSwitchOpen] = useState(false);
   const [tick, setTick] = useState(0), [A, setA] = useState(''), [B, setB] = useState(''), [shown, setShown] = useState(20);
   useEffect(() => { const t = setInterval(() => setTick(x => x + 1), 5000); return () => clearInterval(t); }, []);
 
@@ -64,28 +104,21 @@ export function Team({ p, upd, sync }: { p: Project; upd: Upd; sync: Sync }) {
   const conflicts = active(p).filter(r => isConflict(p, r.id)), resolvedN = Object.keys(p.resolved).length;
   const nameOf = (id: string) => reviewers.find(r => r.id === id)?.name ?? id;
 
-  const onFiles = async (files: FileList | null) => {
-    for (const f of Array.from(files || [])) {
-      const t = parseTeamFile(await f.text());
-      if (!t) { toast(`${f.name}: not an OpenScreen team file`, 'err'); continue; }
-      if (t.kind === 'project') { if (p.recs.length && p.pid !== t.pid) setPending(t); else { upd(q => adoptProject(q, t, empty)); toast('Project loaded'); } }
-      else if (t.pid !== p.pid) toast(`${f.name} belongs to a different project. Load the lead's project file first.`, 'err');
-      else if (t.kind === 'reviewer') { upd(q => mergeReviewer(q, t)); toast(`Decisions from ${t.reviewer.name || 'reviewer'} imported`); }
-      else { upd(q => adoptConfig(q, t)); toast('Shared settings imported'); }
-    }
-    if (file.current) file.current.value = '';
-  };
   const resolve = (id: string, v: Verdict) => upd(q => ({ ...q, resolved: { ...q.resolved, [id]: { v, by: q.me.id, t: Date.now() } } }));
   void tick;
 
   return (
     <div className="stack">
-      <section className="card enter">
-        <h2>Your reviewer profile</h2>
-        <p className="muted">Your name labels your decisions and links you to the ranges in the work plan. Use the same spelling the lead uses there.</p>
-        <input placeholder="Your name, e.g. Ann" value={p.me.name} onChange={e => upd(q => ({ ...q, me: { ...q.me, name: e.target.value } }))} />
-      </section>
-
+      <TeamPanel p={p} sync={sync} />
+      {!p.team && (
+        <section className="card enter">
+          <h2>Your reviewer profile</h2>
+          <p className="muted">Your name labels your decisions and links you to the ranges in the work plan.</p>
+          <input placeholder="Your name, e.g. Ann" value={p.me.name} onChange={e => upd(q => ({ ...q, me: { ...q.me, name: e.target.value } }))} />
+        </section>
+      )}
+      {!canEdit && <div className="note"><Icon n="lock" size={16} /><span>The work plan and blinding are set by the team lead and arrive when you sync.</span></div>}
+      <fieldset className="plain" disabled={!canEdit}>
       <section className="card enter" style={{ animationDelay: '50ms' }}>
         <h2>Work plan</h2>
         <p className="muted">Split the {total} records between reviewers, e.g. Ann screens 1–300, Bob 301–600. Numbers are frozen when the plan is created so everyone sees the same #.</p>
@@ -129,45 +162,11 @@ export function Team({ p, upd, sync }: { p: Project; upd: Upd; sync: Sync }) {
           <label className="check"><input type="checkbox" checked={p.blind} onChange={e => upd(q => ({ ...q, blind: e.target.checked, cfgRev: Date.now() }))} />Blind screening</label></div>
         <p className="muted">While on, other reviewers' decisions, agreement and conflicts stay hidden until you have decided every record assigned to you.</p>
       </section>
-
-      <section className="card enter" style={{ animationDelay: '130ms' }}>
-        <h2>Share &amp; sync</h2>
-        <div className="share-grid">
-          <div><h3>Live: Google Sheet (any device, incl. Android)</h3>
-            <SheetConnect sync={sync} />
-          </div>
-          <div><h3>Live: shared folder (desktop Chrome / Edge)</h3>
-            {!sync.supported ? <div className="note"><Icon n="info" size={16} /><span>Folder sync needs desktop Chrome, Edge or Opera. On a phone use the Google Sheet option.</span></div> : (
-              <>
-                <div className={`syncline s-${sync.status}`}><Icon n="cloud" size={16} /><b>{STATUS_LABEL[sync.status]}</b>{sync.folder && <span className="muted">· {sync.folder}</span>}{sync.status === 'ok' && sync.last > 0 && <span className="muted">· {ago(sync.last)}</span>}</div>
-                {sync.err && <p className="muted small">{sync.err}</p>}
-                <div className="row">
-                  {sync.status === 'off' ? <button className="pri" onClick={sync.connect}><Icon n="folder" size={16} />Choose shared folder</button> : <>
-                    {sync.status === 'needs-permission' && <button className="pri" onClick={sync.reconnect}>Reconnect</button>}
-                    {sync.status === 'mismatch' && <button className="pri" onClick={() => setSwitchOpen(true)}>Use the shared project</button>}
-                    <button onClick={() => sync.syncNow()} disabled={sync.status === 'needs-permission'}><Icon n="refresh" size={16} />Sync now</button>
-                    {p.recs.length > 0 && sync.status === 'ok' && <button className="ghost" onClick={sync.publish}>Publish project</button>}
-                    <button className="ghost" onClick={sync.disconnect}>Disconnect</button></>}
-                </div>
-                {sync.status === 'off' && <p className="muted small">Pick a folder that every reviewer can reach (Dropbox, Google Drive, OneDrive, Syncthing, a network drive). Each person writes only their own file there, so nothing is overwritten.</p>}
-              </>
-            )}
-          </div>
-          <div><h3>Files (no folder needed)</h3>
-            <div className="row">
-              <button onClick={() => { saveJson('openscreen-project.json', toProjectFile(p)); toast('Project exported'); }} disabled={!p.recs.length}><Icon n="download" size={16} />Export project</button>
-              <button onClick={() => { saveJson(`decisions-${(p.me.name || 'me').replace(/\W+/g, '_')}.json`, toReviewerFile(p)); toast('Decisions exported'); }} disabled={!p.me.name.trim()}><Icon n="download" size={16} />Export my decisions</button>
-              <button onClick={() => file.current?.click()}><Icon n="upload" size={16} />Import file</button>
-              <input ref={file} type="file" hidden multiple accept=".json,application/json" onChange={e => onFiles(e.target.files)} />
-            </div>
-            <p className="muted small">The lead exports the project once and sends it to everyone. Later, reviewers swap decision files. The Import button accepts either kind.</p>
-          </div>
-        </div>
-      </section>
+      </fieldset>
 
       <section className="card enter" style={{ animationDelay: '170ms' }}>
         <h2>Agreement &amp; conflicts</h2>
-        {reviewers.length < 2 ? <Empty icon="users" title="No other reviewers yet">Once another reviewer's decisions arrive by folder or file, agreement and conflicts show up here.</Empty>
+        {reviewers.length < 2 ? <Empty icon="users" title="No other reviewers yet">Once your teammates press Sync, their decisions arrive and agreement and conflicts show up here.</Empty>
           : bs.locked ? (
             <div className="locked"><div className="empty-ic"><Icon n="lock" size={26} /></div>
               <h3>Blinded</h3><p className="muted">Decide your remaining <b><Num v={bs.remaining} /></b> assigned record{bs.remaining === 1 ? '' : 's'} to unlock agreement and conflicts.</p>
@@ -197,15 +196,6 @@ export function Team({ p, upd, sync }: { p: Project; upd: Upd; sync: Sync }) {
             </>
           )}
       </section>
-
-      <Modal open={!!pending} onClose={() => setPending(null)} title="Replace your project?">
-        <p className="muted">This file is a different project from the one in your browser. Loading it replaces your records. Your own decisions are kept only for records that also exist in the new project.</p>
-        <div className="row end"><button onClick={() => setPending(null)}>Cancel</button><button className="danger solid" onClick={() => { if (pending) upd(q => adoptProject(q, pending, empty)); setPending(null); toast('Project loaded'); }}>Replace</button></div>
-      </Modal>
-      <Modal open={switchOpen} onClose={() => setSwitchOpen(false)} title="Use the folder's project?">
-        <p className="muted">The shared folder holds a different project from the one in your browser. Switching replaces your local records. Export your project first if you want a backup.</p>
-        <div className="row end"><button onClick={() => setSwitchOpen(false)}>Cancel</button><button className="danger solid" onClick={() => { setSwitchOpen(false); sync.adoptFromFolder(); }}>Switch</button></div>
-      </Modal>
     </div>
   );
 }

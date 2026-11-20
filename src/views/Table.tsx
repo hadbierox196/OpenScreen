@@ -4,12 +4,13 @@ import type { Project } from '../store';
 import type { Rec } from '../core/types';
 import { Icon, Num } from '../ui';
 import { active, Badge, download, hitCount } from '../shared';
+import { decisionsLong, screenedRows } from '../export';
 import { blindState, finalOf, isConflict, numbering } from '../team';
 
 export function Table({ p }: { p: Project }) {
   const [q, setQ] = useState(''), [f, setF] = useState('all'), [sort, setSort] = useState<{ k: string; d: 1 | -1 }>({ k: 'title', d: 1 }), [page, setPage] = useState(0);
   const m = useMemo(() => byId(p.recs), [p.recs]), locked = blindState(p).locked, nums = useMemo(() => numbering(p), [p.recs, p.plan]);
-  const fin = (id: string) => finalOf(p, id, locked), others = locked ? [] : Object.values(p.others);
+  const fin = (id: string) => finalOf(p, id, locked);
   const rows = useMemo(() => {
     const val = (r: Rec, k: string): string | number => k === 'year' ? r.year ?? 0 : k === 'num' ? nums.get(r.id) ?? 0 : k === 'decision' ? fin(r.id) ?? '' : k === 'hits' ? hitCount(r, p).inc : k === 'journal' ? r.journal : r.title;
     return active(p).filter(r => (f === 'all' || (fin(r.id) ?? 'undecided') === f) && (!q || `${r.title} ${r.authors.join(' ')} ${r.doi}`.toLowerCase().includes(q.toLowerCase())))
@@ -17,13 +18,12 @@ export function Table({ p }: { p: Project }) {
   }, [p, q, f, sort]);
   const act = active(p), n = (v: string) => act.filter(r => fin(r.id) === v).length;
   const merged = p.recs.filter(r => r.mergedInto), undecided = act.length - n('include') - n('exclude') - n('maybe');
-  const row = (r: Rec) => [r.title, r.authors.join('; '), r.year ?? '', r.journal, r.doi, r.sourceDb, (r.sources || []).join(' | '), fin(r.id) ?? '', p.decisions[r.id]?.reason ?? '', p.decisions[r.id]?.note ?? '', String(nums.get(r.id) ?? ''), p.decisions[r.id]?.v ?? '', ...others.map(o => o.decisions[r.id]?.v ?? '')];
-  const H = ['Title', 'Authors', 'Year', 'Journal', 'DOI', 'Source', 'All sources', 'Decision', 'Reason', 'Notes', 'Record #', `${p.me.name || 'My'} decision`, ...others.map(o => `${o.name} decision`)];
   const th = (k: string, l: string) => <th className="sortable" onClick={() => setSort(s => ({ k, d: s.k === k ? (-s.d as 1 | -1) : 1 }))}>{l}{sort.k === k && <Icon n="down" size={12} className={sort.d > 0 ? 'flip' : ''} />}</th>;
   const steps: [string, number, string][] = [['Identified', p.recs.length, ''], ['Duplicates removed', merged.length, 'muted'], ['Screened', act.length, ''], ['Included', n('include'), 'ok'], ['Excluded', n('exclude'), 'bad'], ['Maybe', n('maybe'), 'warn'], ['Undecided', undecided, 'muted']];
   const exports: [string, () => void][] = [
-    ['Deduplicated', () => download('deduplicated.csv', [H.slice(0, 7), ...act.map(r => row(r).slice(0, 7).map(String))])],
-    ['Screened', () => download('screened.csv', [H, ...act.map(r => row(r).map(String))])],
+    ['Deduplicated', () => download('deduplicated.csv', screenedRows(p, locked).map(r => r.slice(0, 7)))],
+    ['Screened', () => download('screened.csv', screenedRows(p, locked))],
+    ['All decisions (long)', () => download('decisions-long.csv', decisionsLong(p, locked))],
     ['Duplicates report', () => download('duplicates-report.csv', [['Removed title', 'DOI', 'Merged into'], ...merged.map(r => [r.title, r.doi, rootOf(m, r.id)?.title ?? ''])])],
     ['PRISMA', () => download('prisma.csv', [['Stage', 'Count'], ...steps.map(([l, c]) => [l, String(c)])])],
   ];

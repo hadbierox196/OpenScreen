@@ -1,5 +1,5 @@
 import type { Rec } from './core/types';
-import type { Decision, OtherReviewer, Plan, Project, Resolution, Slice, Verdict } from './store';
+import type { Plan, Project, Slice, Verdict } from './store';
 
 export const uid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now().toString(36));
 const active = (p: Project): Rec[] => p.recs.filter(r => !r.mergedInto);
@@ -90,51 +90,4 @@ export function pairStats(p: Project, a: string, b: string) {
   const A = dec(a), B = dec(b), both: [Verdict, Verdict][] = [], conflicts: string[] = [];
   for (const id of Object.keys(A)) if (B[id]) { both.push([A[id].v, B[id].v]); if (A[id].v !== B[id].v) conflicts.push(id); }
   return { ...kappa(both), conflicts };
-}
-
-/* ---------- files ---------- */
-export interface ReviewerFile { app: 'openscreen'; kind: 'reviewer'; v: 1; pid: string; reviewer: { id: string; name: string }; t: number; decisions: Record<string, Decision>; resolved: Record<string, Resolution> }
-export interface ConfigFile { app: 'openscreen'; kind: 'config'; v: 1; pid: string; cfgRev: number; plan: Plan | null; blind: boolean; question: string; criteria: string; inc: string; exc: string; cs: boolean }
-export interface ProjectFile { app: 'openscreen'; kind: 'project'; v: 1; pid: string; exportedAt: number; project: Partial<Project>; from: ReviewerFile }
-
-export const toReviewerFile = (p: Project): ReviewerFile => ({
-  app: 'openscreen', kind: 'reviewer', v: 1, pid: p.pid, reviewer: { id: p.me.id, name: p.me.name }, t: Date.now(),
-  decisions: p.decisions, resolved: Object.fromEntries(Object.entries(p.resolved).filter(([, r]) => r.by === p.me.id)),
-});
-export const toConfigFile = (p: Project): ConfigFile => ({ app: 'openscreen', kind: 'config', v: 1, pid: p.pid, cfgRev: p.cfgRev, plan: p.plan, blind: p.blind, question: p.question, criteria: p.criteria, inc: p.inc, exc: p.exc, cs: p.cs });
-export function toProjectFile(p: Project): ProjectFile {
-  const { recs, pairs, kept, log, th, inc, exc, cs, imports, question, criteria, plan, blind, cfgRev, others, resolved } = p;
-  return { app: 'openscreen', kind: 'project', v: 1, pid: p.pid, exportedAt: Date.now(), project: { recs, pairs, kept, log, th, inc, exc, cs, imports, question, criteria, plan, blind, cfgRev, others, resolved }, from: toReviewerFile(p) };
-}
-const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object';
-export function parseTeamFile(text: string): ReviewerFile | ProjectFile | ConfigFile | null {
-  try { const j = JSON.parse(text); return isObj(j) && j.app === 'openscreen' && (j.kind === 'reviewer' || j.kind === 'project' || j.kind === 'config') && typeof j.pid === 'string' ? (j as never) : null; } catch { return null; }
-}
-
-/** Merge one reviewer's file into the project. Returns the same object when nothing changed (avoids save/sync loops). */
-export function mergeReviewer(p: Project, f: ReviewerFile): Project {
-  if (f.pid !== p.pid || !f.reviewer?.id || f.reviewer.id === p.me.id || !isObj(f.decisions)) return p;
-  const known = new Set(p.recs.map(r => r.id)), prev = p.others[f.reviewer.id];
-  let changed = false, others = p.others, resolved = p.resolved;
-  if (!prev || f.t > prev.t) {
-    const decisions = Object.fromEntries(Object.entries(f.decisions).filter(([id]) => known.has(id)));
-    if (!prev || prev.name !== f.reviewer.name || JSON.stringify(prev.decisions) !== JSON.stringify(decisions)) {
-      others = { ...p.others, [f.reviewer.id]: { name: f.reviewer.name || 'Reviewer', t: f.t, decisions } as OtherReviewer }; changed = true;
-    }
-  }
-  for (const [id, r] of Object.entries(f.resolved || {})) if (known.has(id) && (!resolved[id] || r.t > resolved[id].t) && resolved[id]?.v !== r.v) { if (resolved === p.resolved) resolved = { ...resolved }; resolved[id] = r; changed = true; }
-  return changed ? { ...p, others, resolved } : p;
-}
-/** Adopt shared settings (plan, blinding, criteria, keywords) when the remote revision is newer. */
-export function adoptConfig(p: Project, c: ConfigFile): Project {
-  if (c.pid !== p.pid || c.cfgRev <= p.cfgRev) return p;
-  return { ...p, cfgRev: c.cfgRev, plan: c.plan, blind: c.blind, question: c.question, criteria: c.criteria, inc: c.inc, exc: c.exc, cs: c.cs };
-}
-/** Replace the local project with a shared one, keeping this browser's identity, scope and own decisions for records that still exist. */
-export function adoptProject(local: Project, f: ProjectFile, empty: Project): Project {
-  const pr = f.project, recs = pr.recs || [], known = new Set(recs.map(r => r.id));
-  const mine = Object.fromEntries(Object.entries(local.decisions).filter(([id]) => known.has(id)));
-  const base: Project = { ...empty, ...pr, pid: f.pid, me: local.me, scope: local.scope, decisions: mine, ai: {}, others: { ...(pr.others || {}) }, resolved: { ...(pr.resolved || {}) } } as Project;
-  delete base.others[local.me.id];
-  return mergeReviewer(base, f.from);
 }

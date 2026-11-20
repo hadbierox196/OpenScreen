@@ -1,144 +1,115 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { empty, loadHandle, saveHandle, type Project } from './store';
-import { adoptConfig, adoptProject, mergeReviewer, parseTeamFile, toConfigFile, toProjectFile, toReviewerFile, type ConfigFile, type ProjectFile, type ReviewerFile } from './team';
+import { useCallback, useRef, useState } from 'react';
+import * as cloud from './cloud';
+import type { Project, TeamLink } from './store';
 import type { Upd } from './shared';
-import { decisionRows, loadSheet, saveSheet, sheetTransport, type Entry, type Transport } from './sheet';
+import { applyCfg, buildJoined, mergeChunk, mergeResolutions, pendingChunks, pendingResolutions, sig } from './teamsync';
 
-/* Minimal File System Access API typings (Chromium: Chrome, Edge, Opera, Brave). */
-interface FileH { kind: 'file'; name: string; getFile(): Promise<File>; createWritable(): Promise<{ write(d: string): Promise<void>; close(): Promise<void> }> }
-interface DirH {
-  kind: 'directory'; name: string; values(): AsyncIterable<FileH | DirH>;
-  getFileHandle(n: string, o?: { create?: boolean }): Promise<FileH>;
-  queryPermission(o: { mode: 'readwrite' }): Promise<string>; requestPermission(o: { mode: 'readwrite' }): Promise<string>;
-}
-export type SyncStatus = 'off' | 'needs-permission' | 'syncing' | 'ok' | 'mismatch' | 'error';
 export type Notify = (text: string, kind?: 'ok' | 'err' | 'info') => void;
+export type SyncStatus = 'idle' | 'busy' | 'ok' | 'error';
 
-const folderTransport = (d: DirH): Transport => ({
-  async list() { const out: Record<string, Entry> = {}; for await (const e of d.values()) if (e.kind === 'file') { const h = e as FileH; out[e.name] = { lm: (await h.getFile()).lastModified, text: async () => (await h.getFile()).text() }; } return out; },
-  async write(name, text) { const w = await (await d.getFileHandle(name, { create: true })).createWritable(); await w.write(text); await w.close(); },
-});
-const read = async (e: Entry) => parseTeamFile(await e.text());
-const msg = (e: unknown) => (e instanceof Error ? e.message : 'Sync failed');
+const nice = (e: unknown) => {
+  const code = (e as { code?: string })?.code ?? '', m = e instanceof Error ? e.message : '';
+  if (code.includes('permission-denied')) return 'No access. The invite may be wrong, or the project was finished or removed.';
+  if (code.includes('unavailable') || /network|offline|failed to fetch/i.test(m)) return 'No connection. Your work is safe on this device; press Sync again when you are online.';
+  if (code.includes('resource-exhausted')) return 'The free Firebase quota is used up for today. Try again tomorrow.';
+  if (code.includes('operation-not-allowed')) return 'Anonymous sign-in is switched off in the Firebase console (Authentication, Sign-in method).';
+  return m || 'Something went wrong.';
+};
 
-/**
- * Shared-folder sync. Layout inside the folder (put it in Dropbox / Drive / OneDrive / Syncthing / a network share):
- *   project.json        records + settings, written once when the lead publishes
- *   config.json         plan, blinding, criteria, keywords (newest cfgRev wins)
- *   reviewer-<id>.json  one file per reviewer, written only by that reviewer, so nobody overwrites anybody
- */
-export function useFolderSync(p: Project, upd: Upd, ready: boolean, notify: Notify) {
-  const supported = typeof window !== 'undefined' && 'showDirectoryPicker' in window;
-  const [status, setStatus] = useState<SyncStatus>('off'), [err, setErr] = useState(''), [last, setLast] = useState(0), [folder, setFolder] = useState('');
-  const [mode, setMode] = useState<'none' | 'folder' | 'sheet'>('none');
-  const dir = useRef<DirH | null>(null), tr = useRef<Transport | null>(null), pr = useRef(p), busy = useRef(false), written = useRef(''), seen = useRef<Record<string, number>>({});
-  pr.current = p;
-  const reset = () => { seen.current = {}; written.current = ''; };
+/** Local-first team sync. Nothing leaves this device until create / join / sync / finish is pressed. */
+export function useTeam(p: Project, upd: Upd, notify: Notify) {
+  const [status, setStatus] = useState<SyncStatus>('idle'), [err, setErr] = useState(''), [step, setStep] = useState('');
+  const pr = useRef(p), busy = useRef(false); pr.current = p;
+  const prog = (what: string) => (d: number, t: number) => setStep(`${what} ${d}/${t}…`);
 
-  const syncOnce = useCallback(async () => {
-    const t = tr.current; if (!t || busy.current) return;
-    busy.current = true;
-    try {
-      if (dir.current && (await dir.current.queryPermission({ mode: 'readwrite' })) !== 'granted') { setStatus('needs-permission'); return; }
-      let local = pr.current; if (!local.pid || !local.me.id) return;
-      const files = await t.list();
+  const run = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    if (busy.current) return undefined;
+    busy.current = true; setStatus('busy'); setErr('');
+    try { const r = await fn(); setStatus('ok'); return r; }
+    catch (e) { setStatus('error'); setErr(nice(e)); return undefined; }
+    finally { busy.current = false; setStep(''); }
+  }, []);
 
-      // 1) project + shared settings
-      if (files['config.json']) {
-        const cfg = (await read(files['config.json'])) as ConfigFile | null;
-        if (cfg && cfg.kind === 'config' && cfg.pid !== local.pid) {
-          if (local.recs.length === 0 && files['project.json']) {
-            const pf = (await read(files['project.json'])) as ProjectFile | null;
-            if (pf && pf.kind === 'project') { upd(q => adoptProject(q, pf, empty)); notify('Joined the shared project'); reset(); setTimeout(syncOnce, 400); setStatus('syncing'); return; }
-          }
-          setStatus('mismatch'); return;
-        }
-        if (cfg && cfg.kind === 'config') {
-          if (cfg.cfgRev > local.cfgRev) { upd(q => adoptConfig(q, cfg)); local = { ...local, cfgRev: cfg.cfgRev }; }
-          else if (local.cfgRev > cfg.cfgRev) await t.write('config.json', JSON.stringify(toConfigFile(local)));
-        }
-      } else if (local.recs.length > 0) {
-        await t.write('project.json', JSON.stringify(toProjectFile(local)));
-        await t.write('config.json', JSON.stringify(toConfigFile(local)));
-        notify('Project published');
-      } else { setStatus('ok'); setLast(Date.now()); setErr('Waiting for the lead reviewer to publish a project here.'); return; }
+  const patchTeam = (f: (t: TeamLink) => TeamLink) => (q: Project): Project => (q.team ? { ...q, team: f(q.team) } : q);
 
-      // 2) other reviewers (only re-read files that changed since last time)
-      for (const [name, e] of Object.entries(files)) {
-        if (!/^reviewer-.+\.json$/.test(name) || seen.current[name] === e.lm) continue;
-        const f = (await read(e)) as ReviewerFile | null;
-        seen.current[name] = e.lm;
-        if (f && f.kind === 'reviewer') upd(q => mergeReviewer(q, f));
-      }
+  /** Lead: create the team and upload the project in one go. */
+  const create = (teamName: string, myName: string) => run(async () => {
+    const local = pr.current; if (!local.recs.length) throw new Error('Import records first.');
+    setStep('Signing in…'); const uid = await cloud.signIn();
+    const base: Project = { ...local, me: { id: uid, name: myName.trim() }, cfgRev: local.cfgRev || Date.now() };
+    const r = await cloud.createTeam(base, teamName.trim(), prog('Uploading'));
+    upd(q => ({ ...q, pid: r.tid, me: base.me, cfgRev: base.cfgRev, team: { tid: r.tid, key: r.key, name: teamName.trim(), lead: true, last: Date.now(), finished: false, sent: {}, seen: 0, projRev: r.projRev, nRecs: r.nRecs, cfgSent: base.cfgRev, members: {} } }));
+    notify('Team created. Share the invite link.');
+  });
 
-      // 3) my own decisions (the sheet backend also gets them as tidy rows for the CSV)
-      if (local.me.name.trim()) {
-        const own = toReviewerFile(local), sig = JSON.stringify([own.reviewer, own.decisions, own.resolved]);
-        if (sig !== written.current) { await t.write(`reviewer-${local.me.id}.json`, JSON.stringify(own), decisionRows(local)); written.current = sig; }
-        setErr('');
-      } else setErr('Enter your name in the Team tab so your decisions can be shared.');
-      setStatus('ok'); setLast(Date.now());
-    } catch (e) { setStatus('error'); setErr(msg(e)); } finally { busy.current = false; }
-  }, [upd, notify]);
+  /** Reviewer: join with the invite link; the project is downloaded once. */
+  const join = (tid: string, key: string, myName: string) => run(async () => {
+    const r = await cloud.joinTeam(tid, key, myName.trim(), prog('Downloading'));
+    upd(() => buildJoined({ tid, name: r.name, uid: r.uid, myName: myName.trim(), recs: r.recs, cfg: r.cfg, cfgRev: r.cfgRev, projRev: r.projRev }));
+    notify(`Joined “${r.name}”`);
+    return true;
+  });
 
-  const connect = async () => {
-    try {
-      const h = await (window as unknown as { showDirectoryPicker(o: object): Promise<DirH> }).showDirectoryPicker({ mode: 'readwrite', id: 'openscreen' });
-      dir.current = h; tr.current = folderTransport(h); setMode('folder'); setFolder(h.name); await saveHandle(h); saveSheet(null); reset(); setStatus('syncing'); setErr('');
-      await syncOnce();
-    } catch (e) { if (!(e instanceof DOMException && e.name === 'AbortError')) { setStatus('error'); setErr(msg(e)); } }
+  /** Push my changes, pull everyone else's. Returns the merged project. */
+  const syncCore = async (): Promise<Project> => {
+    let work = pr.current; const t0 = work.team; if (!t0 || t0.finished) return work;
+    const apply = (f: (q: Project) => Project) => { work = f(work); upd(f); };
+    setStep('Signing in…'); const uid = await cloud.signIn();
+    if (uid !== work.me.id) throw new Error('This browser’s sign-in changed. Open the invite link again to rejoin.');
+    const since = t0.seen;
+    setStep('Syncing…');
+    const pulled = await cloud.pull(t0.tid, since);
+    if (pulled.status === 'finished') { apply(patchTeam(t => ({ ...t, finished: true, last: Date.now() }))); notify('The lead finished this project. Your copy stays on this device: export your results.', 'info'); return work; }
+
+    // shared project + settings
+    if (!t0.lead && pulled.projRev > t0.projRev) {
+      setStep('Updating records…'); const recs = await cloud.fetchRecs(t0.tid, prog('Downloading'));
+      apply(q => ({ ...q, recs, team: q.team && { ...q.team, projRev: pulled.projRev, nRecs: recs.length } }));
+    }
+    if (!t0.lead && pulled.cfg && pulled.cfgRev > work.cfgRev) apply(q => applyCfg(q, pulled.cfg!, pulled.cfgRev));
+    let cfgSent = t0.cfgSent;
+    if (t0.lead && work.cfgRev > pulled.cfgRev) { await cloud.pushConfig(work); cfgSent = work.cfgRev; }
+    else if (t0.lead) cfgSent = Math.max(cfgSent, work.cfgRev);
+
+    // my changes
+    const sent = { ...t0.sent }, chunks = pendingChunks(work, sent), res = pendingResolutions(work, sent);
+    if (chunks.length || res !== null) {
+      await cloud.pushDecisions(t0.tid, uid, work.me.name, chunks, res);
+      for (const c of chunks) sent[c.k] = sig(c.json);
+      if (res !== null) sent.res = sig(res);
+    }
+
+    // everyone else's
+    let seen = t0.seen, fresh = 0;
+    for (const d of pulled.docs) {
+      seen = Math.max(seen, d.t);
+      if (d.rid === uid && since > 0) continue;       // our own uploads coming back
+      if (d.kind === 'res') apply(q => mergeResolutions(q, d.d));
+      else { apply(q => mergeChunk(q, d.rid, d.name, d.k, d.d, d.t)); if (d.rid !== uid) fresh++; }
+    }
+    apply(patchTeam(t => ({ ...t, sent, seen, cfgSent, last: Date.now(), members: pulled.members })));
+    if (fresh) notify('Synced: new decisions from your team');
+    return work;
   };
-  /** Any device (incl. Android): connect to the lead's Google Sheet backend with its /exec URL and token. */
-  const connectSheet = async (url: string, token: string) => {
-    url = url.trim(); token = token.trim();
-    if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url) || !token) { setStatus('error'); setErr('Paste the Web app URL (https://script.google.com/…/exec) and the token.'); return; }
-    dir.current = null; tr.current = sheetTransport(url, token); setMode('sheet'); setFolder('Google Sheet'); saveSheet({ url, token }); await saveHandle(null); reset(); setStatus('syncing'); setErr('');
-    await syncOnce();
-  };
-  const reconnect = async () => { const d = dir.current; if (d && (await d.requestPermission({ mode: 'readwrite' })) === 'granted') { setStatus('syncing'); await syncOnce(); } };
-  const disconnect = async () => { dir.current = null; tr.current = null; setMode('none'); await saveHandle(null); saveSheet(null); setStatus('off'); setFolder(''); setErr(''); };
-  /** Mismatch: throw away the local project and take the shared one. */
-  const adoptFromFolder = async () => {
-    const t = tr.current; if (!t) return;
-    try {
-      const e = (await t.list())['project.json']; if (!e) throw new Error('No project.json has been published yet.');
-      const pf = (await read(e)) as ProjectFile | null;
-      if (!pf || pf.kind !== 'project') throw new Error('project.json is not valid.');
-      upd(q => adoptProject(q, pf, empty)); reset(); setStatus('syncing'); setTimeout(syncOnce, 400);
-    } catch (e) { setStatus('error'); setErr(msg(e)); }
-  };
-  /** Force-write the current records and settings (lead reviewer). */
-  const publish = async () => {
-    const t = tr.current, local = pr.current; if (!t) return;
-    try { await t.write('project.json', JSON.stringify(toProjectFile(local))); await t.write('config.json', JSON.stringify(toConfigFile(local))); notify('Project published'); await syncOnce(); }
-    catch (e) { setStatus('error'); setErr(msg(e)); }
-  };
+  const sync = (quiet = false) => run(async () => { const w = await syncCore(); if (!quiet && !w.team?.finished) notify('Synced'); return true; });
 
-  // restore the remembered connection after a reload (a folder needs one click to re-grant permission; the sheet just resumes)
-  useEffect(() => {
-    if (!ready) return;
-    const sh = loadSheet();
-    if (sh) { tr.current = sheetTransport(sh.url, sh.token); setMode('sheet'); setFolder('Google Sheet'); setStatus('syncing'); syncOnce(); return; }
-    if (!supported) return;
-    loadHandle<DirH>().then(async h => {
-      if (!h) return;
-      dir.current = h; tr.current = folderTransport(h); setMode('folder'); setFolder(h.name);
-      try { if ((await h.queryPermission({ mode: 'readwrite' })) === 'granted') { setStatus('syncing'); syncOnce(); } else setStatus('needs-permission'); } catch { setStatus('needs-permission'); }
-    });
-  }, [ready]); // eslint-disable-line
-  // poll while visible, and after local changes (debounced)
-  const idle = status === 'off' || status === 'needs-permission';
-  useEffect(() => {
-    if (idle) return;
-    const iv = setInterval(() => { if (document.visibilityState === 'visible') syncOnce(); }, mode === 'sheet' ? 30000 : 15000);
-    const v = () => { if (document.visibilityState === 'visible') syncOnce(); };
-    document.addEventListener('visibilitychange', v); window.addEventListener('focus', v);
-    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', v); window.removeEventListener('focus', v); };
-  }, [idle, mode, syncOnce]);
-  useEffect(() => {
-    if (!tr.current || idle) return;
-    const t = setTimeout(syncOnce, 2000); return () => clearTimeout(t);
-  }, [p.decisions, p.resolved, p.me.name, p.cfgRev, p.recs.length]); // eslint-disable-line
+  /** Lead: send the current records again so reviewers pick up newly imported ones. */
+  const republish = () => run(async () => {
+    const r = await cloud.republish(pr.current, prog('Uploading'));
+    upd(patchTeam(t => ({ ...t, projRev: r.projRev, nRecs: r.nRecs, cfgSent: pr.current.cfgRev })));
+    notify('Project updated for the team');
+  });
 
-  return { supported, mode, status, err, last, folder, connect, connectSheet, reconnect, disconnect, syncNow: syncOnce, adoptFromFolder, publish };
+  /** Lead: final sync, hand the results over, delete everything from the server. */
+  const finish = (onExport: (p: Project) => void) => run(async () => {
+    const t = pr.current.team; if (!t?.lead) throw new Error('Only the lead can finish the project.');
+    const merged = await syncCore();
+    onExport(merged);                                  // results are saved on this device before anything is deleted
+    setStep('Removing from the server…'); await cloud.finishTeam(t.tid);
+    upd(patchTeam(x => ({ ...x, finished: true, key: '', last: Date.now() })));
+    notify('Project finished and removed from the server');
+  });
+  const leave = () => upd(q => ({ ...q, team: null }));
+
+  return { configured: cloud.configured, status, err, step, busy: status === 'busy', create, join, sync, republish, finish, leave };
 }
