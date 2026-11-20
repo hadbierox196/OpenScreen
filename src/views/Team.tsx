@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { empty, type Project, type Slice, type Verdict } from '../store';
 import { adoptConfig, adoptProject, blindState, coverage, freezePlan, genSlices, isConflict, kappaLabel, mergeReviewer, pairStats, parseTeamFile, reviewerList, toProjectFile, toReviewerFile, votesFor, type SplitMode } from '../team';
 import type { useFolderSync } from '../sync';
-import { loadSheet } from '../sheet';
+import { loadSheet, makeInvite } from '../sheet';
 import { Badge, VERDICT, active, type Upd } from '../shared';
 import { Empty, Icon, Modal, Num, useToast } from '../ui';
 
@@ -16,7 +16,13 @@ export const STATUS_LABEL: Record<Sync['status'], string> = { off: 'Not connecte
 
 function SheetConnect({ sync }: { sync: Sync }) {
   const saved = loadSheet(), [url, setUrl] = useState(saved?.url ?? ''), [token, setToken] = useState(saved?.token ?? '');
-  const on = sync.mode === 'sheet';
+  const on = sync.mode === 'sheet', toast = useToast();
+  const invite = async () => {
+    const s = loadSheet(); if (!s) return;
+    const link = makeInvite(location.origin + location.pathname, s.url, s.token);
+    try { if (navigator.share) { await navigator.share({ title: 'Join our OpenScreen review', text: 'Tap to join the screening project:', url: link }); return; } } catch (e) { if (e instanceof DOMException && e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(link); toast('Invite link copied. Send it only to your team.'); } catch { window.prompt('Copy this invite link:', link); }
+  };
   return (
     <>
       {on && <div className={`syncline s-${sync.status}`}><Icon n="cloud" size={16} /><b>{STATUS_LABEL[sync.status]}</b>{sync.status === 'ok' && sync.last > 0 && <span className="muted">· {ago(sync.last)}</span>}</div>}
@@ -25,11 +31,13 @@ function SheetConnect({ sync }: { sync: Sync }) {
         <input placeholder="Web app URL (…/exec)" value={url} onChange={e => setUrl(e.target.value)} autoCapitalize="off" autoCorrect="off" />
         <input placeholder="Token" value={token} onChange={e => setToken(e.target.value)} autoCapitalize="off" autoCorrect="off" style={{ marginTop: 8 }} />
         <div className="row" style={{ marginTop: 8 }}><button className="pri" onClick={() => sync.connectSheet(url, token)}><Icon n="cloud" size={16} />Connect</button></div>
-        <p className="muted small">The lead sets this up once (see <code>apps-script/README</code> in the repo) and shares the URL and token. Every decision then lands as a tidy row in their Google Sheet.</p>
+        <p className="muted small">Got an invite link? Just open it, no typing needed. The lead sets this up once (see <code>apps-script/README</code> in the repo) and shares the URL and token. Every decision then lands as a tidy row in their Google Sheet.</p>
       </> : <div className="row">
         <button onClick={() => sync.syncNow()}><Icon n="refresh" size={16} />Sync now</button>
+        <button className="pri" onClick={invite}><Icon n="users" size={16} />Invite reviewers</button>
         <button className="ghost" onClick={sync.publish}>Publish project</button>
         <button className="ghost" onClick={sync.disconnect}>Disconnect</button></div>}
+      {on && <p className="muted small">“Invite reviewers” makes a link that connects a phone in one tap. Anyone with the link can read and write the project, so share it only with your team.</p>}
     </>
   );
 }

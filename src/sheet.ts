@@ -34,3 +34,13 @@ export const sheetTransport = (url: string, token: string): Transport => ({
 export const SHEET_KEY = 'openscreen.sheet';
 export const loadSheet = (): { url: string; token: string } | null => { try { const j = JSON.parse(localStorage.getItem(SHEET_KEY) || ''); return j?.url && j?.token ? j : null; } catch { return null; } };
 export const saveSheet = (v: { url: string; token: string } | null) => { try { if (v) localStorage.setItem(SHEET_KEY, JSON.stringify(v)); else localStorage.removeItem(SHEET_KEY); } catch { /* ignore */ } };
+
+/* ---------- one-tap invite links ----------
+ * https://your.app/#join=<base64url({u,t})>. It sits in the URL hash, which browsers never send to a server. */
+const b64 = (s: string) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64 = (s: string) => atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+export const makeInvite = (base: string, url: string, token: string) => `${base.split('#')[0]}#join=${b64(JSON.stringify({ u: url, t: token }))}`;
+export function parseInvite(hash: string): { url: string; token: string } | null {
+  const m = /(?:^#|&)join=([A-Za-z0-9_-]+)/.exec(hash); if (!m) return null;
+  try { const j = JSON.parse(unb64(m[1])); return typeof j.u === 'string' && typeof j.t === 'string' && /^https:\/\/script\.google(usercontent)?\.com\//.test(j.u) && j.t ? { url: j.u, token: j.t } : null; } catch { return null; }
+}

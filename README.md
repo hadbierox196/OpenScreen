@@ -27,6 +27,9 @@ v0.3: working UI - import (RIS/BibTeX/CSV/TSV), deduplication with review queue,
 - Queue: filter Undecided / Maybe / All; order In order / Most relevant (keyword score, title hits count double); Go to #; session ETA.
 - Cleaner data: reasons stored only for exclusions; AI rationale goes to the note (prefixed `AI:`), not the reason column; undo works across filters.
 
+## v0.8: one-tap invite links
+- Connected lead: Team > Invite reviewers shares (or copies) a link like `https://your.app/#join=...`. Opening it connects the phone to the sheet automatically; no URL or token typing. The token lives in the URL hash (never sent to a server) and is removed from the address bar after joining.
+
 ## Roadmap
 Workers, nbib/EndNote/JSON, RIS/XLSX export, P2P/hosted realtime sync.
 

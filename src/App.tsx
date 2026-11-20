@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { empty, load, save, type Project } from './store';
 import { loadSettings, type AiSettings } from './ai';
 import { Icon, Num, Ring, ToastProvider, useToast, type IconName } from './ui';
 import { useFolderSync } from './sync';
 import { uid } from './team';
+import { parseInvite } from './sheet';
 import { Team, STATUS_LABEL } from './views/Team';
 import { active, pendingPairs, type Tab, type Upd } from './shared';
 import { Import } from './views/Import';
@@ -27,6 +28,13 @@ function Shell() {
   const upd = useCallback<Upd>(f => setP(f), []);
   useEffect(() => { if (ready && (!p.me.id || !p.pid)) upd(q => ({ ...q, me: q.me.id ? q.me : { ...q.me, id: uid() }, pid: q.pid || uid() })); }, [ready, p.me.id, p.pid, upd]);
   const sync = useFolderSync(p, upd, ready, toast);
+  const joined = useRef(false);
+  useEffect(() => { // one-tap invite: open the link, get connected
+    if (!ready || !p.me.id || !p.pid || joined.current) return;
+    const inv = parseInvite(location.hash); if (!inv) return;
+    joined.current = true; history.replaceState(null, '', location.pathname + location.search); // keep the token out of the address bar and history
+    setTab('team'); toast('Joining the team project…', 'info'); sync.connectSheet(inv.url, inv.token);
+  }, [ready, p.me.id, p.pid]); // eslint-disable-line
   const act = active(p), screened = act.filter(r => p.decisions[r.id]).length, pct = act.length ? screened / act.length : 0;
   const review = useMemo(() => pendingPairs(p).length, [p.recs, p.pairs, p.kept]); // eslint-disable-line
   const stats: [string, number][] = [['Imported', p.recs.length], ['Unique', act.length], ['Included', act.filter(r => p.decisions[r.id]?.v === 'include').length]];

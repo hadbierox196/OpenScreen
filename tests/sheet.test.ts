@@ -10,3 +10,16 @@ describe('sheet rows', () => {
     expect(rows[1]).toEqual(['3', 'r3', 'T3', '2020', '10/x3', 'Ann', 'a', 'exclude', 'wrong population', '', '1970-01-01T00:00:00.000Z']);
   });
 });
+import { makeInvite, parseInvite } from '../src/sheet';
+describe('invite links', () => {
+  const url = 'https://script.google.com/macros/s/AKfy_abc-123/exec', token = '3f2a-uuid-token';
+  it('round-trips through the URL hash', () => {
+    const link = makeInvite('https://app.example/openscreen/#old', url, token);
+    expect(link.startsWith('https://app.example/openscreen/#join=')).toBe(true);
+    expect(parseInvite(new URL(link).hash)).toEqual({ url, token });
+  });
+  it('rejects junk and non-Google URLs', () => {
+    expect(parseInvite('')).toBeNull(); expect(parseInvite('#join=%%%')).toBeNull();
+    expect(parseInvite(new URL(makeInvite('https://a.b/', 'https://evil.example/exec', 'x')).hash)).toBeNull();
+  });
+});
